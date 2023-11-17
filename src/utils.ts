@@ -63,7 +63,7 @@ export function getCacheProvider(): CacheProvider {
   const cache = get(cacheProvider);
 
   if (!cache) {
-    throw new Error(`The \`cache-provider\` \`{cacheProvider}\` is not valid.`);
+    throw new Error(`The \`cache-provider\` \`${cacheProvider}\` is not valid.`);
   }
 
   return {
