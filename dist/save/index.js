@@ -85965,12 +85965,23 @@ var __webpack_exports__ = {};
 // ESM COMPAT FLAG
 __nccwpck_require__.r(__webpack_exports__);
 
+// NAMESPACE OBJECT: ./src/local/index.ts
+var src_local_namespaceObject = {};
+__nccwpck_require__.r(src_local_namespaceObject);
+__nccwpck_require__.d(src_local_namespaceObject, {
+  "ReserveCacheError": () => (ReserveCacheError),
+  "ValidationError": () => (ValidationError),
+  "isFeatureAvailable": () => (isFeatureAvailable),
+  "restoreCache": () => (restoreCache),
+  "saveCache": () => (saveCache)
+});
+
 // EXTERNAL MODULE: ./node_modules/@actions/core/lib/core.js
 var core = __nccwpck_require__(2186);
 // EXTERNAL MODULE: ./node_modules/@actions/exec/lib/exec.js
 var exec = __nccwpck_require__(1514);
 // EXTERNAL MODULE: ./node_modules/@actions/io/lib/io.js
-var io = __nccwpck_require__(7436);
+var lib_io = __nccwpck_require__(7436);
 // EXTERNAL MODULE: external "fs"
 var external_fs_ = __nccwpck_require__(7147);
 var external_fs_default = /*#__PURE__*/__nccwpck_require__.n(external_fs_);
@@ -86955,7 +86966,602 @@ function parse(toml) {
 var lib_cache = __nccwpck_require__(7551);
 // EXTERNAL MODULE: ./node_modules/@actions/cache/lib/cache.js
 var cache_lib_cache = __nccwpck_require__(7799);
+// EXTERNAL MODULE: external "util"
+var external_util_ = __nccwpck_require__(3837);
+// EXTERNAL MODULE: ./node_modules/semver/semver.js
+var semver = __nccwpck_require__(5911);
+// EXTERNAL MODULE: ./node_modules/uuid/index.js
+var uuid = __nccwpck_require__(2155);
+;// CONCATENATED MODULE: ./src/local/constants.ts
+var CacheFilename;
+(function (CacheFilename) {
+    CacheFilename["Gzip"] = "cache.tgz";
+    CacheFilename["Zstd"] = "cache.tzst";
+})(CacheFilename || (CacheFilename = {}));
+var CompressionMethod;
+(function (CompressionMethod) {
+    CompressionMethod["Gzip"] = "gzip";
+    // Long range mode was added to zstd in v1.3.2.
+    // This enum is for earlier version of zstd that does not have --long support
+    CompressionMethod["ZstdWithoutLong"] = "zstd-without-long";
+    CompressionMethod["Zstd"] = "zstd";
+})(CompressionMethod || (CompressionMethod = {}));
+var ArchiveToolType;
+(function (ArchiveToolType) {
+    ArchiveToolType["GNU"] = "gnu";
+    ArchiveToolType["BSD"] = "bsd";
+})(ArchiveToolType || (ArchiveToolType = {}));
+// The default number of retry attempts.
+const DefaultRetryAttempts = 2;
+// The default delay in milliseconds between retry attempts.
+const DefaultRetryDelay = 5000;
+// Socket timeout in milliseconds during download.  If no traffic is received
+// over the socket during this period, the socket is destroyed and the download
+// is aborted.
+const SocketTimeout = 5000;
+// The default path of GNUtar on hosted Windows runners
+const GnuTarPathOnWindows = `${process.env.PROGRAMFILES}\\Git\\usr\\bin\\tar.exe`;
+// The default path of BSDtar on hosted Windows runners
+const SystemTarPathOnWindows = `${process.env.SYSTEMDRIVE}\\Windows\\System32\\tar.exe`;
+const TarFilename = 'cache.tar';
+const ManifestFilename = 'manifest.txt';
+
+;// CONCATENATED MODULE: ./src/local/cacheUtils.ts
+
+
+
+
+
+
+
+
+
+
+// From https://github.com/actions/toolkit/blob/main/packages/tool-cache/src/tool-cache.ts#L23
+async function createTempDirectory() {
+    const IS_WINDOWS = process.platform === 'win32';
+    let tempDirectory = process.env.RUNNER_TEMP || '';
+    if (!tempDirectory) {
+        let baseLocation;
+        if (IS_WINDOWS) {
+            // On Windows use the USERPROFILE env variable
+            baseLocation = process.env.USERPROFILE || 'C:\\';
+        }
+        else if (process.platform === 'darwin') {
+            baseLocation = '/Users';
+        }
+        else {
+            baseLocation = '/home';
+        }
+        tempDirectory = path.join(baseLocation, 'actions', 'temp');
+    }
+    const dest = path.join(tempDirectory, uuidV4());
+    await io.mkdirP(dest);
+    return dest;
+}
+function getArchiveFileSizeInBytes(filePath) {
+    return external_fs_.statSync(filePath).size;
+}
+async function resolvePaths(patterns) {
+    const paths = [];
+    const workspace = process.env.GITHUB_WORKSPACE ?? process.cwd();
+    const globber = await glob.create(patterns.join('\n'), {
+        implicitDescendants: false,
+    });
+    // eslint-disable-next-line no-restricted-syntax
+    for await (const file of globber.globGenerator()) {
+        const relativeFile = external_path_.relative(workspace, file)
+            .replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/');
+        core.debug(`Matched: ${relativeFile}`);
+        // Paths are made relative so the tar entries are all relative to the root of the workspace.
+        if (relativeFile === '') {
+            // path.relative returns empty string if workspace and file are equal
+            paths.push('.');
+        }
+        else {
+            paths.push(`${relativeFile}`);
+        }
+    }
+    return paths;
+}
+async function unlinkFile(filePath) {
+    return util.promisify(fs.unlink)(filePath);
+}
+async function getVersion(app, additionalArgs = []) {
+    let versionOutput = '';
+    additionalArgs.push('--version');
+    core.debug(`Checking ${app} ${additionalArgs.join(' ')}`);
+    try {
+        await exec.exec(`${app}`, additionalArgs, {
+            ignoreReturnCode: true,
+            silent: true,
+            listeners: {
+                stdout: (data) => {
+                    versionOutput += data.toString();
+                    return versionOutput;
+                },
+                stderr: (data) => {
+                    versionOutput += data.toString();
+                    return versionOutput;
+                },
+            },
+        });
+    }
+    catch (err) {
+        core.debug(err.message);
+    }
+    versionOutput = versionOutput.trim();
+    core.debug(versionOutput);
+    return versionOutput;
+}
+// Use zstandard if possible to maximize cache performance
+async function getCompressionMethod() {
+    const versionOutput = await getVersion('zstd', ['--quiet']);
+    const version = semver.clean(versionOutput);
+    core.debug(`zstd version: ${version}`);
+    if (versionOutput === '') {
+        return CompressionMethod.Gzip;
+    }
+    return CompressionMethod.ZstdWithoutLong;
+}
+function getCacheFileName(compressionMethod) {
+    return compressionMethod === CompressionMethod.Gzip
+        ? CacheFilename.Gzip
+        : CacheFilename.Zstd;
+}
+async function getGnuTarPathOnWindows() {
+    if (external_fs_.existsSync(GnuTarPathOnWindows)) {
+        return GnuTarPathOnWindows;
+    }
+    const versionOutput = await getVersion('tar');
+    return versionOutput.toLowerCase().includes('gnu tar') ? lib_io.which('tar') : '';
+}
+function assertDefined(name, value) {
+    if (value === undefined) {
+        throw Error(`Expected ${name} but value was undefiend`);
+    }
+    return value;
+}
+function isGhes() {
+    const ghUrl = new URL(process.env.GITHUB_SERVER_URL || 'https://github.com');
+    return ghUrl.hostname.toUpperCase() !== 'GITHUB.COM';
+}
+
+;// CONCATENATED MODULE: ./src/local/tar.ts
+
+
+
+
+
+
+const IS_WINDOWS = process.platform === 'win32';
+// Returns tar path and type: BSD or GNU
+async function getTarPath() {
+    switch (process.platform) {
+        case 'win32': {
+            const gnuTar = await getGnuTarPathOnWindows();
+            const systemTar = SystemTarPathOnWindows;
+            if (gnuTar) {
+                // Use GNUtar as default on windows
+                return { path: gnuTar, type: ArchiveToolType.GNU };
+            }
+            if ((0,external_fs_.existsSync)(systemTar)) {
+                return { path: systemTar, type: ArchiveToolType.BSD };
+            }
+            break;
+        }
+        case 'darwin': {
+            const gnuTar = await lib_io.which('gtar', false);
+            if (gnuTar) {
+                // fix permission denied errors when extracting BSD tar archive with GNU tar - https://github.com/actions/cache/issues/527
+                return { path: gnuTar, type: ArchiveToolType.GNU };
+            }
+            return {
+                path: await lib_io.which('tar', true),
+                type: ArchiveToolType.BSD,
+            };
+        }
+        default:
+            break;
+    }
+    // Default assumption is GNU tar is present in path
+    return {
+        path: await lib_io.which('tar', true),
+        type: ArchiveToolType.GNU,
+    };
+}
+async function tar_getCacheFileName(compressionMethod, resolveTarPath = getTarPath()) {
+    const tarPath = await resolveTarPath;
+    const BSD_TAR_ZSTD = tarPath.type === ArchiveToolType.BSD
+        && compressionMethod !== CompressionMethod.Gzip
+        && IS_WINDOWS;
+    return BSD_TAR_ZSTD
+        ? 'cache.tar'
+        : getCacheFileName(compressionMethod);
+}
+// Return arguments for tar as per tarPath, compressionMethod, method type and os
+async function getTarArgs(tarPath, compressionMethod, type, archivePath = '') {
+    const args = [`"${tarPath.path}"`];
+    const cacheFileName = external_path_.join(archivePath, await tar_getCacheFileName(compressionMethod, Promise.resolve(tarPath)));
+    const tarFile = 'cache.tar';
+    const workingDirectory = getWorkingDirectory();
+    // Speficic args for BSD tar on windows for workaround
+    const BSD_TAR_ZSTD = tarPath.type === ArchiveToolType.BSD
+        && compressionMethod !== CompressionMethod.Gzip
+        && IS_WINDOWS;
+    // Method specific args
+    switch (type) {
+        case 'create':
+            args.push('--posix', '-cf', cacheFileName.replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/'), '-P', '-C', workingDirectory.replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/'), '--files-from', ManifestFilename);
+            break;
+        case 'extract':
+            args.push('-xf', BSD_TAR_ZSTD
+                ? tarFile
+                : archivePath.replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/'), '-P', '-C', workingDirectory.replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/'));
+            break;
+        case 'list':
+            args.push('-tf', BSD_TAR_ZSTD
+                ? tarFile
+                : archivePath.replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/'), '-P');
+            break;
+        default:
+    }
+    // Platform specific args
+    if (tarPath.type === ArchiveToolType.GNU) {
+        switch (process.platform) {
+            case 'win32':
+                args.push('--force-local');
+                break;
+            case 'darwin':
+                args.push('--delay-directory-restore');
+                break;
+            default:
+        }
+    }
+    return Promise.resolve(args);
+}
+// Returns commands to run tar and compression program
+async function getCommands(compressionMethod, type, archivePath = '') {
+    let args;
+    const tarPath = await getTarPath();
+    const tarArgs = await getTarArgs(tarPath, compressionMethod, type, archivePath);
+    const compressionArgs = type !== 'create'
+        ? await getDecompressionProgram(tarPath, compressionMethod, archivePath)
+        : await getCompressionProgram(tarPath, compressionMethod);
+    const BSD_TAR_ZSTD = tarPath.type === ArchiveToolType.BSD
+        && compressionMethod !== CompressionMethod.Gzip
+        && IS_WINDOWS;
+    if (BSD_TAR_ZSTD && type !== 'create') {
+        args = [[...compressionArgs].join(' '), [...tarArgs].join(' ')];
+    }
+    else {
+        args = [[...tarArgs].join(' '), [...compressionArgs].join(' ')];
+    }
+    if (BSD_TAR_ZSTD) {
+        return args;
+    }
+    return [args.join(' ')];
+}
+function getWorkingDirectory() {
+    return process.env.GITHUB_WORKSPACE ?? process.cwd();
+}
+// Common function for extractTar and listTar to get the compression method
+function getDecompressionProgram(tarPath, compressionMethod, archivePath) {
+    // -d: Decompress.
+    // unzstd is equivalent to 'zstd -d'
+    // --long=#: Enables long distance matching with # bits. Maximum is 30 (1GB) on 32-bit OS and 31 (2GB) on 64-bit.
+    // Using 30 here because we also support 32-bit self-hosted runners.
+    const BSD_TAR_ZSTD = tarPath.type === ArchiveToolType.BSD
+        && compressionMethod !== CompressionMethod.Gzip
+        && IS_WINDOWS;
+    switch (compressionMethod) {
+        case CompressionMethod.Zstd:
+            return Promise.resolve(BSD_TAR_ZSTD
+                ? [
+                    'zstd -d --long=30 --force -o',
+                    TarFilename,
+                    archivePath.replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/'),
+                ]
+                : [
+                    '--use-compress-program',
+                    IS_WINDOWS ? '"zstd -d --long=30"' : 'unzstd --long=30',
+                ]);
+        case CompressionMethod.ZstdWithoutLong:
+            return Promise.resolve(BSD_TAR_ZSTD
+                ? [
+                    'zstd -d --force -o',
+                    TarFilename,
+                    archivePath.replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/'),
+                ]
+                : ['--use-compress-program', IS_WINDOWS ? '"zstd -d"' : 'unzstd']);
+        default:
+            return Promise.resolve(['-z']);
+    }
+}
+// Used for creating the archive
+// -T#: Compress using # working thread. If # is 0, attempt to detect and use the number of physical CPU cores.
+// zstdmt is equivalent to 'zstd -T0'
+// --long=#: Enables long distance matching with # bits. Maximum is 30 (1GB) on 32-bit OS and 31 (2GB) on 64-bit.
+// Using 30 here because we also support 32-bit self-hosted runners.
+// Long range mode is added to zstd in v1.3.2 release, so we will not use --long in older version of zstd.
+function getCompressionProgram(tarPath, compressionMethod) {
+    const cacheFileName = getCacheFileName(compressionMethod);
+    const BSD_TAR_ZSTD = tarPath.type === ArchiveToolType.BSD
+        && compressionMethod !== CompressionMethod.Gzip
+        && IS_WINDOWS;
+    switch (compressionMethod) {
+        case CompressionMethod.Zstd:
+            return Promise.resolve(BSD_TAR_ZSTD
+                ? [
+                    'zstd -T0 --long=30 --force -o',
+                    cacheFileName.replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/'),
+                    TarFilename,
+                ]
+                : [
+                    '--use-compress-program',
+                    IS_WINDOWS ? '"zstd -T0 --long=30"' : 'zstdmt --long=30',
+                ]);
+        case CompressionMethod.ZstdWithoutLong:
+            return Promise.resolve(BSD_TAR_ZSTD
+                ? [
+                    'zstd -T0 --force -o',
+                    cacheFileName.replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/'),
+                    TarFilename,
+                ]
+                : ['--use-compress-program', IS_WINDOWS ? '"zstd -T0"' : 'zstdmt']);
+        default:
+            return Promise.resolve(['-z']);
+    }
+}
+// Executes all commands as separate processes
+async function execCommands(commands, cwd) {
+    // eslint-disable-next-line no-restricted-syntax
+    for (const command of commands) {
+        try {
+            // eslint-disable-next-line no-await-in-loop
+            await (0,exec.exec)(command, undefined, {
+                cwd,
+                env: { ...process.env, MSYS: 'winsymlinks:nativestrict' },
+            });
+        }
+        catch (error) {
+            throw new Error(`${command.split(' ')[0]} failed with error: ${error.message}`);
+        }
+    }
+}
+// List the contents of a tar
+async function listTar(archivePath, compressionMethod) {
+    const commands = await getCommands(compressionMethod, 'list', archivePath);
+    await execCommands(commands);
+}
+// Extract a tar
+async function extractTar(archivePath, compressionMethod) {
+    // Create directory to extract tar into
+    const workingDirectory = getWorkingDirectory();
+    await lib_io.mkdirP(workingDirectory);
+    const commands = await getCommands(compressionMethod, 'extract', archivePath);
+    await execCommands(commands);
+}
+// Create a tar
+async function createTar(archiveFolder, sourceDirectories, compressionMethod) {
+    // Write source directories to manifest.txt to avoid command length limits
+    (0,external_fs_.writeFileSync)(external_path_.join(archiveFolder, ManifestFilename), sourceDirectories.join('\n'));
+    const commands = await getCommands(compressionMethod, 'create', archiveFolder);
+    await execCommands(commands, archiveFolder);
+}
+
+;// CONCATENATED MODULE: ./src/local/errors.ts
+/* eslint-disable max-classes-per-file */
+class ValidationError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'ValidationError';
+        Object.setPrototypeOf(this, ValidationError.prototype);
+    }
+}
+class ReserveCacheError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'ReserveCacheError';
+        Object.setPrototypeOf(this, ReserveCacheError.prototype);
+    }
+}
+
+// EXTERNAL MODULE: ./node_modules/@actions/io/lib/io-util.js
+var io_util = __nccwpck_require__(1962);
+;// CONCATENATED MODULE: ./src/local/local.ts
+
+
+
+async function getLocalCacheEntry(keys, compressionMethod) {
+    const cacheFileName = await tar_getCacheFileName(compressionMethod);
+    const result = await keys.reduce(async (asyncMemo, key) => {
+        const memo = await asyncMemo;
+        if (memo)
+            return memo;
+        const cacheDir = await getLocalArchiveFolder(key, true);
+        if (!cacheDir || !await (0,io_util.exists)(cacheDir))
+            return undefined;
+        const cacheKey = external_path_.basename(cacheDir);
+        const archiveLocation = external_path_.join(cacheDir, cacheFileName);
+        if (!await (0,io_util.exists)(archiveLocation))
+            return undefined;
+        return {
+            cacheKey,
+            archiveLocation,
+        };
+    }, Promise.resolve(undefined));
+    return result;
+}
+// eslint-disable-next-line max-len
+async function getLocalArchiveFolder(key, findKey = false) {
+    const { GITHUB_REPOSITORY, RUNNER_TOOL_CACHE } = process.env;
+    if (!RUNNER_TOOL_CACHE) {
+        throw new TypeError('Expected RUNNER_TOOL_CACHE environment variable to be defined.');
+    }
+    if (!GITHUB_REPOSITORY) {
+        throw new TypeError('Expected GITHUB_REPOSITORY environment variable to be defined.');
+    }
+    const cachePath = external_path_.join(RUNNER_TOOL_CACHE, GITHUB_REPOSITORY);
+    const primaryCacheKey = external_path_.join(cachePath, key);
+    if (!findKey || await (0,io_util.exists)(primaryCacheKey))
+        return primaryCacheKey;
+    const files = await (0,io_util.readdir)(cachePath);
+    const cacheKey = await files.reduce(async (memo, file) => {
+        await memo;
+        if (!file.startsWith(key))
+            return memo;
+        const stats = await (0,io_util.lstat)(external_path_.join(cachePath, file));
+        if (!stats.isDirectory())
+            return memo;
+        return file;
+    }, Promise.resolve(undefined));
+    if (!cacheKey)
+        return undefined;
+    return external_path_.join(cachePath, cacheKey);
+}
+
+;// CONCATENATED MODULE: ./src/local/index.ts
+
+
+
+
+
+
+
+
+/**
+ * isFeatureAvailable to check the presence of Actions cache service
+ *
+ * @returns boolean return true if Actions cache service feature is available, otherwise false
+ */
+function isFeatureAvailable() {
+    return true;
+}
+function checkPaths(paths) {
+    if (!paths || paths.length === 0) {
+        throw new ValidationError('Path Validation Error: At least one directory or file path is required');
+    }
+}
+function checkKey(key) {
+    if (key.length > 512) {
+        throw new ValidationError(`Key Validation Error: ${key} cannot be larger than 512 characters.`);
+    }
+    const regex = /^[^,]*$/;
+    if (!regex.test(key)) {
+        throw new ValidationError(`Key Validation Error: ${key} cannot contain commas.`);
+    }
+}
+/**
+ * Restores cache from keys
+ *
+ * @param paths a list of file paths to restore from the cache
+ * @param primaryKey an explicit key for restoring the cache
+ * @param restoreKeys an optional ordered list of keys to use for restoring the cache if no cache hit occurred for key
+ * @param downloadOptions cache download options
+ * @param enableCrossOsArchive an optional boolean enabled to restore on windows any cache created on any platform
+ * @returns string returns the key for the cache hit, otherwise returns undefined
+ */
+async function restoreCache(paths, primaryKey, restoreKeys, _options, _enableCrossOsArchive) {
+    checkPaths(paths);
+    // eslint-disable-next-line no-param-reassign
+    restoreKeys = restoreKeys || [];
+    const keys = [primaryKey, ...restoreKeys];
+    core.debug('Resolved Keys:');
+    core.debug(JSON.stringify(keys));
+    if (keys.length > 10) {
+        throw new ValidationError('Key Validation Error: Keys are limited to a maximum of 10.');
+    }
+    // eslint-disable-next-line no-restricted-syntax
+    for (const key of keys) {
+        checkKey(key);
+    }
+    const compressionMethod = await getCompressionMethod();
+    let archivePath = '';
+    try {
+        // path are needed to compute version
+        const cacheEntry = await getLocalCacheEntry(keys, compressionMethod);
+        if (!cacheEntry?.archiveLocation) {
+            // Cache not found
+            return undefined;
+        }
+        archivePath = cacheEntry.archiveLocation;
+        if (core.isDebug()) {
+            await listTar(archivePath, compressionMethod);
+        }
+        const archiveFileSize = getArchiveFileSizeInBytes(archivePath);
+        core.info(`Cache Size: ~${Math.round(archiveFileSize / (1024 * 1024))} MB (${archiveFileSize} B)`);
+        await extractTar(archivePath, compressionMethod);
+        core.info('Cache restored successfully');
+        return cacheEntry.cacheKey;
+    }
+    catch (error) {
+        const typedError = error;
+        if (typedError.name === ValidationError.name) {
+            throw error;
+        }
+        else {
+            // Supress all non-validation cache related errors because caching should be optional
+            core.warning(`Failed to restore: ${error.message}`);
+        }
+    }
+    return undefined;
+}
+/**
+ * Saves a list of files with the specified key
+ *
+ * @param paths a list of file paths to be cached
+ * @param key an explicit key for restoring the cache
+ * @param enableCrossOsArchive an optional boolean enabled to save cache on windows which could be restored on any platform
+ * @param options cache upload options
+ * @returns number returns cacheId if the cache was saved successfully and throws an error if save fails
+ */
+async function saveCache(paths, key) {
+    checkPaths(paths);
+    checkKey(key);
+    const compressionMethod = await getCompressionMethod();
+    const cachePaths = await resolvePaths(paths);
+    core.debug('Cache Paths:');
+    core.debug(`${JSON.stringify(cachePaths)}`);
+    if (cachePaths.length === 0) {
+        throw new Error(
+        // eslint-disable-next-line max-len
+        'Path Validation Error: Path(s) specified in the action for caching do(es) not exist, hence no cache is being saved.');
+    }
+    const archiveFolder = await getLocalArchiveFolder(key);
+    await lib_io.mkdirP(archiveFolder);
+    const archivePath = external_path_.join(archiveFolder, getCacheFileName(compressionMethod));
+    core.debug(`Archive Path: ${archivePath}`);
+    try {
+        await createTar(archiveFolder, cachePaths, compressionMethod);
+        if (core.isDebug()) {
+            await listTar(archivePath, compressionMethod);
+        }
+        const fileSizeLimit = 10 * 1024 * 1024 * 1024; // 10GB per repo limit
+        const archiveFileSize = getArchiveFileSizeInBytes(archivePath);
+        core.debug(`File Size: ${archiveFileSize}`);
+        // For GHES, this check will take place in ReserveCache API with enterprise file size limit
+        if (archiveFileSize > fileSizeLimit && !isGhes()) {
+            throw new Error(`Cache size of ~${Math.round(archiveFileSize / (1024 * 1024))} MB (${archiveFileSize} B) is over the 10GB limit, not saving cache.`);
+        }
+    }
+    catch (error) {
+        const typedError = error;
+        if (typedError.name === ValidationError.name) {
+            throw error;
+        }
+        else if (typedError.name === ReserveCacheError.name) {
+            core.info(`Failed to save: ${typedError.message}`);
+        }
+        else {
+            core.warning(`Failed to save: ${typedError.message}`);
+        }
+    }
+    return -1;
+}
+
 ;// CONCATENATED MODULE: ./src/utils.ts
+
 
 
 
@@ -86998,9 +87604,17 @@ async function getCmdOutput(cmd, args = [], options = {}) {
 }
 function getCacheProvider() {
     const cacheProvider = core.getInput("cache-provider");
-    const cache = cacheProvider === "github" ? cache_lib_cache : cacheProvider === "buildjet" ? lib_cache : undefined;
+    function get(cacheProvider) {
+        switch (cacheProvider) {
+            case "github": return cache_lib_cache;
+            case "buildjet": return lib_cache;
+            case "local": return src_local_namespaceObject;
+            default: return undefined;
+        }
+    }
+    const cache = get(cacheProvider);
     if (!cache) {
-        throw new Error(`The \`cache-provider\` \`{cacheProvider}\` is not valid.`);
+        throw new Error(`The \`cache-provider\` \`${cacheProvider}\` is not valid.`);
     }
     return {
         name: cacheProvider,
@@ -87629,14 +88243,14 @@ async function rm(parent, dirent) {
             await external_fs_default().promises.unlink(fileName);
         }
         else if (dirent.isDirectory()) {
-            await io.rmRF(fileName);
+            await lib_io.rmRF(fileName);
         }
     }
     catch { }
 }
 async function rmRF(dirName) {
     core.debug(`deleting "${dirName}"`);
-    await io.rmRF(dirName);
+    await lib_io.rmRF(dirName);
 }
 async function exists(path) {
     try {

@@ -5,6 +5,19 @@ import * as utils from './cacheUtils'
 import { createTar, extractTar, listTar } from './tar'
 import { ValidationError, ReserveCacheError } from './errors'
 import { getLocalCacheEntry, getLocalArchiveFolder } from './local'
+import { DownloadOptions } from '@actions/cache/lib/options'
+
+export { ValidationError, ReserveCacheError }
+
+
+/**
+ * isFeatureAvailable to check the presence of Actions cache service
+ *
+ * @returns boolean return true if Actions cache service feature is available, otherwise false
+ */
+export function isFeatureAvailable(): boolean {
+  return true
+}
 
 function checkPaths(paths: string[]): void {
     if (!paths || paths.length === 0) {
@@ -43,7 +56,8 @@ export async function restoreCache(
     paths: string[],
     primaryKey: string,
     restoreKeys?: string[],
-    lookupOnly?: boolean,
+    _options?: DownloadOptions,
+    _enableCrossOsArchive?: boolean
   ): Promise<string | undefined> {
     checkPaths(paths)
   
@@ -72,11 +86,6 @@ export async function restoreCache(
       if (!cacheEntry?.archiveLocation) {
         // Cache not found
         return undefined
-      }
-  
-      if (lookupOnly) {
-        core.info('Lookup only - skipping download')
-        return cacheEntry.cacheKey
       }
   
       archivePath = cacheEntry.archiveLocation
@@ -121,7 +130,7 @@ export async function restoreCache(
   export async function saveCache(
     paths: string[],
     key: string,
-  ) {
+  ): Promise<number> {
     checkPaths(paths)
     checkKey(key)
   
@@ -173,4 +182,6 @@ export async function restoreCache(
         core.warning(`Failed to save: ${typedError.message}`)
       }
     }
+
+    return -1;
   }

@@ -52,7 +52,7 @@ export interface CacheProvider {
 export function getCacheProvider(): CacheProvider {
   const cacheProvider = core.getInput("cache-provider");
 
-  function get(cacheProvider: string): typeof ghCache {
+  function get(cacheProvider: string): typeof ghCache | undefined {
     switch (cacheProvider) {
       case "github": return ghCache;
       case "buildjet": return buildjetCache;
