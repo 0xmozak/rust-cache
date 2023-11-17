@@ -2,6 +2,7 @@ import * as core from "@actions/core";
 import * as exec from "@actions/exec";
 import * as buildjetCache from "@actions/buildjet-cache";
 import * as ghCache from "@actions/cache";
+import * as localCache from "./local";
 
 export function reportError(e: any) {
   const { commandFailed } = e;
@@ -50,7 +51,16 @@ export interface CacheProvider {
 
 export function getCacheProvider(): CacheProvider {
   const cacheProvider = core.getInput("cache-provider");
-  const cache = cacheProvider === "github" ? ghCache : cacheProvider === "buildjet" ? buildjetCache : undefined;
+
+  function get(cacheProvider: string): typeof ghCache {
+    switch (cacheProvider) {
+      case "github": return ghCache;
+      case "buildjet": return buildjetCache;
+      case "local": return localCache;
+      default: return undefined;
+    }
+  }
+  const cache = get(cacheProvider);
 
   if (!cache) {
     throw new Error(`The \`cache-provider\` \`{cacheProvider}\` is not valid.`);
