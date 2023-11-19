@@ -34,5 +34,3 @@ export const GnuTarPathOnWindows = `${process.env.PROGRAMFILES}\\Git\\usr\\bin\\
 export const SystemTarPathOnWindows = `${process.env.SYSTEMDRIVE}\\Windows\\System32\\tar.exe`
 
 export const TarFilename = 'cache.tar'
-
-export const ManifestFilename = 'manifest.txt'
