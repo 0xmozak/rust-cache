@@ -86970,8 +86970,6 @@ var cache_lib_cache = __nccwpck_require__(7799);
 var external_util_ = __nccwpck_require__(3837);
 // EXTERNAL MODULE: ./node_modules/semver/semver.js
 var semver = __nccwpck_require__(5911);
-// EXTERNAL MODULE: ./node_modules/uuid/index.js
-var uuid = __nccwpck_require__(2155);
 ;// CONCATENATED MODULE: ./src/local/constants.ts
 var CacheFilename;
 (function (CacheFilename) {
@@ -87004,7 +87002,6 @@ const GnuTarPathOnWindows = `${process.env.PROGRAMFILES}\\Git\\usr\\bin\\tar.exe
 // The default path of BSDtar on hosted Windows runners
 const SystemTarPathOnWindows = `${process.env.SYSTEMDRIVE}\\Windows\\System32\\tar.exe`;
 const TarFilename = 'cache.tar';
-const ManifestFilename = 'manifest.txt';
 
 ;// CONCATENATED MODULE: ./src/local/cacheUtils.ts
 
@@ -87017,28 +87014,25 @@ const ManifestFilename = 'manifest.txt';
 
 
 
-// From https://github.com/actions/toolkit/blob/main/packages/tool-cache/src/tool-cache.ts#L23
-async function createTempDirectory() {
-    const IS_WINDOWS = process.platform === 'win32';
-    let tempDirectory = process.env.RUNNER_TEMP || '';
-    if (!tempDirectory) {
-        let baseLocation;
-        if (IS_WINDOWS) {
-            // On Windows use the USERPROFILE env variable
-            baseLocation = process.env.USERPROFILE || 'C:\\';
-        }
-        else if (process.platform === 'darwin') {
-            baseLocation = '/Users';
-        }
-        else {
-            baseLocation = '/home';
-        }
-        tempDirectory = path.join(baseLocation, 'actions', 'temp');
-    }
-    const dest = path.join(tempDirectory, uuidV4());
-    await io.mkdirP(dest);
-    return dest;
+function lazyInit(fn) {
+    let prom = undefined;
+    return () => prom = (prom || fn());
 }
+// Use zstandard if possible to maximize cache performance
+const getCompressionMethod = lazyInit(async () => {
+    const versionOutput = await getVersion('zstd', ['--quiet']);
+    const version = semver.clean(versionOutput);
+    lib_core.debug(`zstd version: ${version}`);
+    if (versionOutput === '') {
+        return CompressionMethod.Gzip;
+    }
+    return CompressionMethod.ZstdWithoutLong;
+});
+const getCacheFileName = lazyInit(async () => {
+    return await getCompressionMethod() === CompressionMethod.Gzip
+        ? CacheFilename.Gzip
+        : CacheFilename.Zstd;
+});
 function getArchiveFileSizeInBytes(filePath) {
     return external_fs_.statSync(filePath).size;
 }
@@ -87050,8 +87044,7 @@ async function resolvePaths(patterns) {
     });
     // eslint-disable-next-line no-restricted-syntax
     for await (const file of globber.globGenerator()) {
-        const relativeFile = external_path_.relative(workspace, file)
-            .replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/');
+        const relativeFile = posixPath(external_path_.relative(workspace, file));
         lib_core.debug(`Matched: ${relativeFile}`);
         // Paths are made relative so the tar entries are all relative to the root of the workspace.
         if (relativeFile === '') {
@@ -87094,37 +87087,43 @@ async function getVersion(app, additionalArgs = []) {
     lib_core.debug(versionOutput);
     return versionOutput;
 }
-// Use zstandard if possible to maximize cache performance
-async function getCompressionMethod() {
-    const versionOutput = await getVersion('zstd', ['--quiet']);
-    const version = semver.clean(versionOutput);
-    lib_core.debug(`zstd version: ${version}`);
-    if (versionOutput === '') {
-        return CompressionMethod.Gzip;
-    }
-    return CompressionMethod.ZstdWithoutLong;
-}
-function getCacheFileName(compressionMethod) {
-    return compressionMethod === CompressionMethod.Gzip
-        ? CacheFilename.Gzip
-        : CacheFilename.Zstd;
-}
-async function getGnuTarPathOnWindows() {
+const getGnuTarPathOnWindows = lazyInit(async () => {
     if (external_fs_.existsSync(GnuTarPathOnWindows)) {
         return GnuTarPathOnWindows;
     }
     const versionOutput = await getVersion('tar');
     return versionOutput.toLowerCase().includes('gnu tar') ? lib_io.which('tar') : '';
-}
+});
 function assertDefined(name, value) {
     if (value === undefined) {
         throw Error(`Expected ${name} but value was undefiend`);
     }
     return value;
 }
-function isGhes() {
+const isGhes = lazyInit(async () => {
     const ghUrl = new URL(process.env.GITHUB_SERVER_URL || 'https://github.com');
     return ghUrl.hostname.toUpperCase() !== 'GITHUB.COM';
+});
+function posixFile(filename) {
+    return filename;
+}
+function posixPath(windowsPath) {
+    return windowsPath
+        // handle the edge-case of Window's long file names
+        // See: https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file#short-vs-long-names
+        .replace(/^\\\\\?\\/, "")
+        // convert the separators, valid since both \ and / can't be in a windows filename
+        .replace(/\\/g, '\/')
+        // compress any // or /// to be just /, which is a safe operation under POSIX
+        // and prevents accidental errors caused by manually doing path1+path2
+        .replace(/\/\/+/g, '\/');
+}
+function posixJoin(...paths) {
+    return external_path_.posix.join(...paths);
+}
+function cacheUtils_randomName() {
+    return Math.floor(new Date().getTime() / 1000).toString(36)
+        + external_crypto_.randomBytes(12).toString('base64url');
 }
 
 ;// CONCATENATED MODULE: ./src/local/tar.ts
@@ -87136,7 +87135,7 @@ function isGhes() {
 
 const IS_WINDOWS = process.platform === 'win32';
 // Returns tar path and type: BSD or GNU
-async function getTarPath() {
+const getTarTool = lazyInit(async () => {
     switch (process.platform) {
         case 'win32': {
             const gnuTar = await getGnuTarPathOnWindows();
@@ -87145,7 +87144,7 @@ async function getTarPath() {
                 // Use GNUtar as default on windows
                 return { path: gnuTar, type: ArchiveToolType.GNU };
             }
-            if ((0,external_fs_.existsSync)(systemTar)) {
+            if ((await promises_.stat(systemTar)).isFile()) {
                 return { path: systemTar, type: ArchiveToolType.BSD };
             }
             break;
@@ -87169,43 +87168,23 @@ async function getTarPath() {
         path: await lib_io.which('tar', true),
         type: ArchiveToolType.GNU,
     };
-}
-async function tar_getCacheFileName(compressionMethod, resolveTarPath = getTarPath()) {
-    const tarPath = await resolveTarPath;
-    const BSD_TAR_ZSTD = tarPath.type === ArchiveToolType.BSD
+});
+const isBsdTarZstd = lazyInit(async () => {
+    const tarPath = await getTarTool();
+    const compressionMethod = await getCompressionMethod();
+    return tarPath.type === ArchiveToolType.BSD
         && compressionMethod !== CompressionMethod.Gzip
         && IS_WINDOWS;
-    return BSD_TAR_ZSTD
-        ? 'cache.tar'
-        : getCacheFileName(compressionMethod);
-}
-// Return arguments for tar as per tarPath, compressionMethod, method type and os
-async function getTarArgs(tarPath, compressionMethod, type, archivePath = '') {
-    const args = [`"${tarPath.path}"`];
-    const cacheFileName = external_path_.join(archivePath, await tar_getCacheFileName(compressionMethod, Promise.resolve(tarPath)));
-    const tarFile = 'cache.tar';
-    const workingDirectory = getWorkingDirectory();
-    // Speficic args for BSD tar on windows for workaround
-    const BSD_TAR_ZSTD = tarPath.type === ArchiveToolType.BSD
-        && compressionMethod !== CompressionMethod.Gzip
-        && IS_WINDOWS;
-    // Method specific args
-    switch (type) {
-        case 'create':
-            args.push('--posix', '-cf', cacheFileName.replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/'), '-P', '-C', workingDirectory.replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/'), '--files-from', ManifestFilename);
-            break;
-        case 'extract':
-            args.push('-xf', BSD_TAR_ZSTD
-                ? tarFile
-                : archivePath.replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/'), '-P', '-C', workingDirectory.replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/'));
-            break;
-        case 'list':
-            args.push('-tf', BSD_TAR_ZSTD
-                ? tarFile
-                : archivePath.replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/'), '-P');
-            break;
-        default:
-    }
+});
+const tar_getCacheFileName = lazyInit(async () => {
+    return posixFile(await isBsdTarZstd()
+        ? TarFilename
+        : await getCacheFileName());
+});
+async function getTarProgram(methodSpecificArgs) {
+    const tarPath = await getTarTool();
+    const program = tarPath.path;
+    const args = await methodSpecificArgs();
     // Platform specific args
     if (tarPath.type === ArchiveToolType.GNU) {
         switch (process.platform) {
@@ -87218,62 +87197,93 @@ async function getTarArgs(tarPath, compressionMethod, type, archivePath = '') {
             default:
         }
     }
-    return Promise.resolve(args);
+    return { program, args };
+}
+// Return create specific arguments
+async function getTarCreateArgs(manifestPath, archivePath) {
+    const workingDirectory = posixPath(getWorkingDirectory());
+    return [
+        '--posix',
+        '-cf',
+        archivePath,
+        '-P',
+        '-C',
+        workingDirectory,
+        '--files-from',
+        manifestPath,
+    ];
+}
+async function getTarExtractArgs(archivePath) {
+    const workingDirectory = getWorkingDirectory();
+    const file = await isBsdTarZstd() ? TarFilename : archivePath;
+    return [
+        '-xf',
+        file,
+        '-P',
+        '-C',
+        posixPath(workingDirectory),
+    ];
+}
+// Return arguments for tar as per tarPath, compressionMethod, method type and os
+async function getTarListArgs(archivePath) {
+    const file = await isBsdTarZstd() ? TarFilename : posixPath(archivePath);
+    return [
+        '-tf',
+        file,
+        '-P',
+    ];
 }
 // Returns commands to run tar and compression program
-async function getCommands(compressionMethod, type, archivePath = '') {
-    let args;
-    const tarPath = await getTarPath();
-    const tarArgs = await getTarArgs(tarPath, compressionMethod, type, archivePath);
-    const compressionArgs = type !== 'create'
-        ? await getDecompressionProgram(tarPath, compressionMethod, archivePath)
-        : await getCompressionProgram(tarPath, compressionMethod);
-    const BSD_TAR_ZSTD = tarPath.type === ArchiveToolType.BSD
-        && compressionMethod !== CompressionMethod.Gzip
-        && IS_WINDOWS;
-    if (BSD_TAR_ZSTD && type !== 'create') {
-        args = [[...compressionArgs].join(' '), [...tarArgs].join(' ')];
+async function getCommands(addMethodSpecificTarArgs, getProgram, isCreate = false) {
+    const tarProgram = (await getTarProgram(addMethodSpecificTarArgs));
+    const compressionProgram = (await getProgram());
+    if ("program" in compressionProgram) {
+        if (isCreate) {
+            return [compressionProgram, tarProgram];
+        }
+        else {
+            return [tarProgram, compressionProgram];
+        }
     }
-    else {
-        args = [[...tarArgs].join(' '), [...compressionArgs].join(' ')];
-    }
-    if (BSD_TAR_ZSTD) {
-        return args;
-    }
-    return [args.join(' ')];
+    return [{
+            program: tarProgram.program,
+            args: tarProgram.args.concat(compressionProgram)
+        }];
 }
 function getWorkingDirectory() {
     return process.env.GITHUB_WORKSPACE ?? process.cwd();
 }
 // Common function for extractTar and listTar to get the compression method
-function getDecompressionProgram(tarPath, compressionMethod, archivePath) {
+async function getDecompressionProgram(archivePath) {
+    const compressionMethod = await getCompressionMethod();
     // -d: Decompress.
     // unzstd is equivalent to 'zstd -d'
     // --long=#: Enables long distance matching with # bits. Maximum is 30 (1GB) on 32-bit OS and 31 (2GB) on 64-bit.
     // Using 30 here because we also support 32-bit self-hosted runners.
-    const BSD_TAR_ZSTD = tarPath.type === ArchiveToolType.BSD
-        && compressionMethod !== CompressionMethod.Gzip
-        && IS_WINDOWS;
+    const BSD_TAR_ZSTD = await isBsdTarZstd();
     switch (compressionMethod) {
         case CompressionMethod.Zstd:
-            return Promise.resolve(BSD_TAR_ZSTD
-                ? [
-                    'zstd -d --long=30 --force -o',
-                    TarFilename,
-                    archivePath.replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/'),
-                ]
-                : [
-                    '--use-compress-program',
-                    IS_WINDOWS ? '"zstd -d --long=30"' : 'unzstd --long=30',
-                ]);
+            if (BSD_TAR_ZSTD) {
+                return {
+                    program: 'zstd',
+                    args: ['-d', '--long=30', '--force', '-o', TarFilename, archivePath],
+                };
+            }
+            if (IS_WINDOWS) {
+                return ['--use-compress-program', '"zstd -d --long=30"'];
+            }
+            return ['--use-compress-program', 'unzstd', '--long=30'];
         case CompressionMethod.ZstdWithoutLong:
-            return Promise.resolve(BSD_TAR_ZSTD
-                ? [
-                    'zstd -d --force -o',
-                    TarFilename,
-                    archivePath.replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/'),
-                ]
-                : ['--use-compress-program', IS_WINDOWS ? '"zstd -d"' : 'unzstd']);
+            if (BSD_TAR_ZSTD) {
+                return {
+                    program: 'zstd',
+                    args: ['-d', '--force', '-o', TarFilename, archivePath],
+                };
+            }
+            if (IS_WINDOWS) {
+                return ['--use-compress-program', '"zstd -d"'];
+            }
+            return ['--use-compress-program', 'unzstd'];
         default:
             return Promise.resolve(['-z']);
     }
@@ -87284,33 +87294,34 @@ function getDecompressionProgram(tarPath, compressionMethod, archivePath) {
 // --long=#: Enables long distance matching with # bits. Maximum is 30 (1GB) on 32-bit OS and 31 (2GB) on 64-bit.
 // Using 30 here because we also support 32-bit self-hosted runners.
 // Long range mode is added to zstd in v1.3.2 release, so we will not use --long in older version of zstd.
-function getCompressionProgram(tarPath, compressionMethod) {
-    const cacheFileName = getCacheFileName(compressionMethod);
-    const BSD_TAR_ZSTD = tarPath.type === ArchiveToolType.BSD
-        && compressionMethod !== CompressionMethod.Gzip
-        && IS_WINDOWS;
+async function getCompressionProgram(archivePath) {
+    const compressionMethod = await getCompressionMethod();
+    const BSD_TAR_ZSTD = await isBsdTarZstd();
     switch (compressionMethod) {
         case CompressionMethod.Zstd:
-            return Promise.resolve(BSD_TAR_ZSTD
-                ? [
-                    'zstd -T0 --long=30 --force -o',
-                    cacheFileName.replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/'),
-                    TarFilename,
-                ]
-                : [
-                    '--use-compress-program',
-                    IS_WINDOWS ? '"zstd -T0 --long=30"' : 'zstdmt --long=30',
-                ]);
+            if (BSD_TAR_ZSTD) {
+                return {
+                    program: 'zstd',
+                    args: ['-T0', '--long=30', '--force', '-o', archivePath, TarFilename]
+                };
+            }
+            if (IS_WINDOWS) {
+                return ['--use-compress-program', '"zstd -T0 --long=30"'];
+            }
+            return ['--use-compress-program', 'zstdmt', '--long=30'];
         case CompressionMethod.ZstdWithoutLong:
-            return Promise.resolve(BSD_TAR_ZSTD
-                ? [
-                    'zstd -T0 --force -o',
-                    cacheFileName.replace(new RegExp(`\\${external_path_.sep}`, 'g'), '/'),
-                    TarFilename,
-                ]
-                : ['--use-compress-program', IS_WINDOWS ? '"zstd -T0"' : 'zstdmt']);
+            if (BSD_TAR_ZSTD) {
+                return {
+                    program: 'zstd',
+                    args: ['-T0', '--force', '-o', archivePath, TarFilename]
+                };
+            }
+            if (IS_WINDOWS) {
+                return ['--use-compress-program', '"zstd -T0"'];
+            }
+            return ['--use-compress-program', 'zstdmt'];
         default:
-            return Promise.resolve(['-z']);
+            return ['-z'];
     }
 }
 // Executes all commands as separate processes
@@ -87319,35 +87330,47 @@ async function execCommands(commands, cwd) {
     for (const command of commands) {
         try {
             // eslint-disable-next-line no-await-in-loop
-            await (0,exec.exec)(command, undefined, {
+            await (0,exec.exec)(command.program, command.args, {
                 cwd,
                 env: { ...process.env, MSYS: 'winsymlinks:nativestrict' },
             });
         }
         catch (error) {
-            throw new Error(`${command.split(' ')[0]} failed with error: ${error.message}`);
+            throw new Error(`${command.program} failed with error: ${error.message}`);
         }
     }
 }
 // List the contents of a tar
-async function listTar(archivePath, compressionMethod) {
-    const commands = await getCommands(compressionMethod, 'list', archivePath);
+async function listTar(archivePath) {
+    const commands = await getCommands(() => getTarListArgs(archivePath), () => getDecompressionProgram(archivePath));
     await execCommands(commands);
 }
 // Extract a tar
-async function extractTar(archivePath, compressionMethod) {
+async function extractTar(archivePath) {
     // Create directory to extract tar into
     const workingDirectory = getWorkingDirectory();
     await lib_io.mkdirP(workingDirectory);
-    const commands = await getCommands(compressionMethod, 'extract', archivePath);
+    const commands = await getCommands(() => getTarExtractArgs(archivePath), () => getDecompressionProgram(archivePath));
     await execCommands(commands);
 }
 // Create a tar
-async function createTar(archiveFolder, sourceDirectories, compressionMethod) {
+async function createTar(archiveFolder, sourceDirectories) {
+    // Use temp files to avoid multiple writers
+    const randomName = cacheUtils_randomName();
+    const manifestFilename = `manifest.${randomName}.txt`;
+    const TarTempFileName = posixPath(randomName + await tar_getCacheFileName());
+    const ZipTempFileName = posixPath(randomName + await getCacheFileName());
+    const ZipFileName = posixPath(await getCacheFileName());
+    const manifestPath = external_path_.join(archiveFolder, manifestFilename);
+    const TarTempPath = posixJoin(archiveFolder, TarTempFileName);
+    const ZipTempPath = posixJoin(archiveFolder, ZipTempFileName);
+    const ZipPath = posixJoin(archiveFolder, ZipFileName);
     // Write source directories to manifest.txt to avoid command length limits
-    (0,external_fs_.writeFileSync)(external_path_.join(archiveFolder, ManifestFilename), sourceDirectories.join('\n'));
-    const commands = await getCommands(compressionMethod, 'create', archiveFolder);
+    await promises_.writeFile(manifestPath, sourceDirectories.join('\n'));
+    const commands = await getCommands(() => getTarCreateArgs(posixPath(manifestPath), TarTempPath), () => getCompressionProgram(ZipTempPath), true);
     await execCommands(commands, archiveFolder);
+    await promises_.link(ZipTempPath, ZipPath);
+    await promises_.unlink(ZipTempPath);
 }
 
 ;// CONCATENATED MODULE: ./src/local/errors.ts
@@ -87373,8 +87396,8 @@ var io_util = __nccwpck_require__(1962);
 
 
 
-async function getLocalCacheEntry(keys, compressionMethod) {
-    const cacheFileName = await tar_getCacheFileName(compressionMethod);
+async function getLocalCacheEntry(keys) {
+    const cacheFileName = await tar_getCacheFileName();
     const result = await keys.reduce(async (asyncMemo, key) => {
         const memo = await asyncMemo;
         if (memo)
@@ -87429,7 +87452,6 @@ async function getLocalArchiveFolder(key, findKey = false) {
 
 
 
-
 /**
  * isFeatureAvailable to check the presence of Actions cache service
  *
@@ -87476,22 +87498,20 @@ async function restoreCache(paths, primaryKey, restoreKeys, _options, _enableCro
     for (const key of keys) {
         checkKey(key);
     }
-    const compressionMethod = await getCompressionMethod();
-    let archivePath = '';
     try {
         // path are needed to compute version
-        const cacheEntry = await getLocalCacheEntry(keys, compressionMethod);
+        const cacheEntry = await getLocalCacheEntry(keys);
         if (!cacheEntry?.archiveLocation) {
             // Cache not found
             return undefined;
         }
-        archivePath = cacheEntry.archiveLocation;
+        let archivePath = posixPath(cacheEntry.archiveLocation);
         if (lib_core.isDebug()) {
-            await listTar(archivePath, compressionMethod);
+            await listTar(archivePath);
         }
         const archiveFileSize = getArchiveFileSizeInBytes(archivePath);
         lib_core.info(`Cache Size: ~${Math.round(archiveFileSize / (1024 * 1024))} MB (${archiveFileSize} B)`);
-        await extractTar(archivePath, compressionMethod);
+        await extractTar(archivePath);
         lib_core.info('Cache restored successfully');
         return cacheEntry.cacheKey;
     }
@@ -87519,7 +87539,6 @@ async function restoreCache(paths, primaryKey, restoreKeys, _options, _enableCro
 async function saveCache(paths, key) {
     checkPaths(paths);
     checkKey(key);
-    const compressionMethod = await getCompressionMethod();
     const cachePaths = await resolvePaths(paths);
     lib_core.debug('Cache Paths:');
     lib_core.debug(`${JSON.stringify(cachePaths)}`);
@@ -87530,12 +87549,13 @@ async function saveCache(paths, key) {
     }
     const archiveFolder = await getLocalArchiveFolder(key);
     await lib_io.mkdirP(archiveFolder);
-    const archivePath = external_path_.join(archiveFolder, getCacheFileName(compressionMethod));
+    const posixArchiveFolder = posixPath(archiveFolder);
+    const archivePath = posixJoin(posixArchiveFolder, posixFile(await getCacheFileName()));
     lib_core.debug(`Archive Path: ${archivePath}`);
     try {
-        await createTar(archiveFolder, cachePaths, compressionMethod);
+        await createTar(posixArchiveFolder, cachePaths);
         if (lib_core.isDebug()) {
-            await listTar(archivePath, compressionMethod);
+            await listTar(archivePath);
         }
         const fileSizeLimit = 10 * 1024 * 1024 * 1024; // 10GB per repo limit
         const archiveFileSize = getArchiveFileSizeInBytes(archivePath);

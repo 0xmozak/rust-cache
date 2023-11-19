@@ -6,36 +6,36 @@ import * as exec from '@actions/exec'
 import * as glob from '@actions/glob'
 import * as io from '@actions/io'
 import * as semver from 'semver'
-import { v4 as uuidV4 } from 'uuid'
+import * as crypto from 'crypto'
 import {
   CacheFilename,
   CompressionMethod,
   GnuTarPathOnWindows,
+  TarFilename
 } from './constants'
 
-// From https://github.com/actions/toolkit/blob/main/packages/tool-cache/src/tool-cache.ts#L23
-export async function createTempDirectory(): Promise<string> {
-  const IS_WINDOWS = process.platform === 'win32'
-
-  let tempDirectory: string = process.env.RUNNER_TEMP || ''
-
-  if (!tempDirectory) {
-    let baseLocation: string
-    if (IS_WINDOWS) {
-      // On Windows use the USERPROFILE env variable
-      baseLocation = process.env.USERPROFILE || 'C:\\'
-    } else if (process.platform === 'darwin') {
-      baseLocation = '/Users'
-    } else {
-      baseLocation = '/home'
-    }
-    tempDirectory = path.join(baseLocation, 'actions', 'temp')
-  }
-
-  const dest = path.join(tempDirectory, uuidV4())
-  await io.mkdirP(dest)
-  return dest
+export function lazyInit<Type>(fn: () => Promise<Type>) : () => Promise<Type> {
+	let prom: Promise<Type> | undefined = undefined;
+	return () => prom = (prom || fn());
 }
+
+// Use zstandard if possible to maximize cache performance
+export const getCompressionMethod = lazyInit(async () => {
+  const versionOutput = await getVersion('zstd', ['--quiet'])
+  const version = semver.clean(versionOutput)
+  core.debug(`zstd version: ${version}`)
+
+  if (versionOutput === '') {
+    return CompressionMethod.Gzip
+  }
+  return CompressionMethod.ZstdWithoutLong as CompressionMethod
+});
+
+export const getCacheFileName = lazyInit(async () => {
+  return await getCompressionMethod() === CompressionMethod.Gzip
+    ? CacheFilename.Gzip
+    : CacheFilename.Zstd
+});
 
 export function getArchiveFileSizeInBytes(filePath: string): number {
   return fs.statSync(filePath).size
@@ -50,9 +50,7 @@ export async function resolvePaths(patterns: string[]): Promise<string[]> {
 
   // eslint-disable-next-line no-restricted-syntax
   for await (const file of globber.globGenerator()) {
-    const relativeFile = path
-      .relative(workspace, file)
-      .replace(new RegExp(`\\${path.sep}`, 'g'), '/')
+    const relativeFile = posixPath(path.relative(workspace, file))
     core.debug(`Matched: ${relativeFile}`)
     // Paths are made relative so the tar entries are all relative to the root of the workspace.
     if (relativeFile === '') {
@@ -101,31 +99,13 @@ async function getVersion(
   return versionOutput
 }
 
-// Use zstandard if possible to maximize cache performance
-export async function getCompressionMethod(): Promise<CompressionMethod> {
-  const versionOutput = await getVersion('zstd', ['--quiet'])
-  const version = semver.clean(versionOutput)
-  core.debug(`zstd version: ${version}`)
-
-  if (versionOutput === '') {
-    return CompressionMethod.Gzip
-  }
-  return CompressionMethod.ZstdWithoutLong
-}
-
-export function getCacheFileName(compressionMethod: CompressionMethod): string {
-  return compressionMethod === CompressionMethod.Gzip
-    ? CacheFilename.Gzip
-    : CacheFilename.Zstd
-}
-
-export async function getGnuTarPathOnWindows(): Promise<string> {
+export const getGnuTarPathOnWindows = lazyInit(async () => {
   if (fs.existsSync(GnuTarPathOnWindows)) {
     return GnuTarPathOnWindows
   }
   const versionOutput = await getVersion('tar')
   return versionOutput.toLowerCase().includes('gnu tar') ? io.which('tar') : ''
-}
+});
 
 export function assertDefined<T>(name: string, value?: T): T {
   if (value === undefined) {
@@ -135,9 +115,37 @@ export function assertDefined<T>(name: string, value?: T): T {
   return value
 }
 
-export function isGhes(): boolean {
+export const isGhes = lazyInit(async () => {
   const ghUrl = new URL(
     process.env.GITHUB_SERVER_URL || 'https://github.com',
   )
   return ghUrl.hostname.toUpperCase() !== 'GITHUB.COM'
+});
+
+interface PosixPathBrand { _type: "Posix"; }
+export type PosixPath = string & PosixPathBrand;
+
+export function posixFile(filename: CacheFilename | typeof TarFilename): PosixPath {
+  return filename as PosixPath
+}
+
+export function posixPath(windowsPath: string): PosixPath {
+  return windowsPath
+    // handle the edge-case of Window's long file names
+    // See: https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file#short-vs-long-names
+    .replace(/^\\\\\?\\/,"")
+    // convert the separators, valid since both \ and / can't be in a windows filename
+    .replace(/\\/g,'\/')
+    // compress any // or /// to be just /, which is a safe operation under POSIX
+    // and prevents accidental errors caused by manually doing path1+path2
+    .replace(/\/\/+/g,'\/') as PosixPath
+}
+
+export function posixJoin(...paths: PosixPath[]): PosixPath {
+  return path.posix.join(...paths) as PosixPath
+}
+
+export function randomName(): string {
+  return Math.floor(new Date().getTime() / 1000).toString(36)
+    + crypto.randomBytes(12).toString('base64url')
 }

@@ -1,6 +1,5 @@
 import * as path from 'path'
 import { exists, lstat, readdir } from '@actions/io/lib/io-util'
-import { CompressionMethod } from './constants'
 import { getCacheFileName } from './tar'
 
 interface CacheResult {
@@ -10,9 +9,8 @@ interface CacheResult {
 
 export async function getLocalCacheEntry(
   keys: string[],
-  compressionMethod: CompressionMethod,
 ): Promise<CacheResult | undefined> {
-  const cacheFileName = await getCacheFileName(compressionMethod)
+  const cacheFileName = await getCacheFileName()
   const result = await keys.reduce<Promise<CacheResult | undefined>>(async (asyncMemo, key) => {
     const memo = await asyncMemo
     if (memo) return memo

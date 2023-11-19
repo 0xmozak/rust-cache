@@ -1,4 +1,3 @@
-import * as path from 'path'
 import * as core from '@actions/core'
 import * as io from '@actions/io'
 import * as utils from './cacheUtils'
@@ -8,7 +7,6 @@ import { getLocalCacheEntry, getLocalArchiveFolder } from './local'
 import { DownloadOptions } from '@actions/cache/lib/options'
 
 export { ValidationError, ReserveCacheError }
-
 
 /**
  * isFeatureAvailable to check the presence of Actions cache service
@@ -78,20 +76,18 @@ export async function restoreCache(
       checkKey(key)
     }
   
-    const compressionMethod = await utils.getCompressionMethod()
-    let archivePath = ''
     try {
       // path are needed to compute version
-      const cacheEntry = await getLocalCacheEntry(keys, compressionMethod)
+      const cacheEntry = await getLocalCacheEntry(keys)
       if (!cacheEntry?.archiveLocation) {
         // Cache not found
         return undefined
       }
   
-      archivePath = cacheEntry.archiveLocation
+      let archivePath = utils.posixPath(cacheEntry.archiveLocation)
   
       if (core.isDebug()) {
-        await listTar(archivePath, compressionMethod)
+        await listTar(archivePath)
       }
   
       const archiveFileSize = utils.getArchiveFileSizeInBytes(archivePath)
@@ -101,7 +97,7 @@ export async function restoreCache(
         )} MB (${archiveFileSize} B)`,
       )
   
-      await extractTar(archivePath, compressionMethod)
+      await extractTar(archivePath)
       core.info('Cache restored successfully')
   
       return cacheEntry.cacheKey
@@ -134,7 +130,6 @@ export async function restoreCache(
     checkPaths(paths)
     checkKey(key)
   
-    const compressionMethod = await utils.getCompressionMethod()
     const cachePaths = await utils.resolvePaths(paths)
     core.debug('Cache Paths:')
     core.debug(`${JSON.stringify(cachePaths)}`)
@@ -148,17 +143,18 @@ export async function restoreCache(
   
     const archiveFolder = await getLocalArchiveFolder(key)
     await io.mkdirP(archiveFolder)
-    const archivePath = path.join(
-      archiveFolder,
-      utils.getCacheFileName(compressionMethod),
+    const posixArchiveFolder = utils.posixPath(archiveFolder);
+    const archivePath = utils.posixJoin(
+      posixArchiveFolder,
+      utils.posixFile(await utils.getCacheFileName()),
     )
   
     core.debug(`Archive Path: ${archivePath}`)
   
     try {
-      await createTar(archiveFolder, cachePaths, compressionMethod)
+      await createTar(posixArchiveFolder, cachePaths)
       if (core.isDebug()) {
-        await listTar(archivePath, compressionMethod)
+        await listTar(archivePath)
       }
       const fileSizeLimit = 10 * 1024 * 1024 * 1024 // 10GB per repo limit
       const archiveFileSize = utils.getArchiveFileSizeInBytes(archivePath)
