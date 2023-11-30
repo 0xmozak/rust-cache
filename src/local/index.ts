@@ -54,7 +54,7 @@ export async function restoreCache(
     paths: string[],
     primaryKey: string,
     restoreKeys?: string[],
-    _options?: DownloadOptions,
+    options?: DownloadOptions,
     _enableCrossOsArchive?: boolean
   ): Promise<string | undefined> {
     checkPaths(paths)
@@ -82,6 +82,10 @@ export async function restoreCache(
       if (!cacheEntry?.archiveLocation) {
         // Cache not found
         return undefined
+      }
+
+      if (options?.lookupOnly) {
+        return cacheEntry.cacheKey
       }
   
       let archivePath = utils.posixPath(cacheEntry.archiveLocation)

@@ -87484,7 +87484,7 @@ function checkKey(key) {
  * @param enableCrossOsArchive an optional boolean enabled to restore on windows any cache created on any platform
  * @returns string returns the key for the cache hit, otherwise returns undefined
  */
-async function restoreCache(paths, primaryKey, restoreKeys, _options, _enableCrossOsArchive) {
+async function restoreCache(paths, primaryKey, restoreKeys, options, _enableCrossOsArchive) {
     checkPaths(paths);
     // eslint-disable-next-line no-param-reassign
     restoreKeys = restoreKeys || [];
@@ -87504,6 +87504,9 @@ async function restoreCache(paths, primaryKey, restoreKeys, _options, _enableCro
         if (!cacheEntry?.archiveLocation) {
             // Cache not found
             return undefined;
+        }
+        if (options?.lookupOnly) {
+            return cacheEntry.cacheKey;
         }
         let archivePath = posixPath(cacheEntry.archiveLocation);
         if (core.isDebug()) {

@@ -87484,7 +87484,7 @@ function checkKey(key) {
  * @param enableCrossOsArchive an optional boolean enabled to restore on windows any cache created on any platform
  * @returns string returns the key for the cache hit, otherwise returns undefined
  */
-async function restoreCache(paths, primaryKey, restoreKeys, _options, _enableCrossOsArchive) {
+async function restoreCache(paths, primaryKey, restoreKeys, options, _enableCrossOsArchive) {
     checkPaths(paths);
     // eslint-disable-next-line no-param-reassign
     restoreKeys = restoreKeys || [];
@@ -87504,6 +87504,9 @@ async function restoreCache(paths, primaryKey, restoreKeys, _options, _enableCro
         if (!cacheEntry?.archiveLocation) {
             // Cache not found
             return undefined;
+        }
+        if (options?.lookupOnly) {
+            return cacheEntry.cacheKey;
         }
         let archivePath = posixPath(cacheEntry.archiveLocation);
         if (lib_core.isDebug()) {
@@ -88294,12 +88297,15 @@ process.on("uncaughtException", (e) => {
     }
 });
 async function run() {
+    setCacheHitOutput(await run_helper());
+}
+async function run_helper() {
     const cacheProvider = getCacheProvider();
     if (!cacheProvider.cache.isFeatureAvailable()) {
-        setCacheHitOutput(false);
-        return;
+        return CacheHit.Miss;
     }
     try {
+        const fullMatch = lib_core.getInput("require-full-match").toLowerCase() !== "true";
         var cacheOnFailure = lib_core.getInput("cache-on-failure").toLowerCase();
         if (cacheOnFailure !== "true") {
             cacheOnFailure = "false";
@@ -88314,7 +88320,11 @@ async function run() {
         // Pass a copy of cachePaths to avoid mutating the original array as reported by:
         // https://github.com/actions/toolkit/pull/1378
         // TODO: remove this once the underlying bug is fixed.
-        const restoreKey = await cacheProvider.cache.restoreCache(config.cachePaths.slice(), key, [config.restoreKey]);
+        const paths = config.cachePaths.slice();
+        if (fullMatch && await cacheProvider.cache.restoreCache(paths, key, [config.restoreKey], { lookupOnly: true }) !== key) {
+            return CacheHit.Miss;
+        }
+        const restoreKey = await cacheProvider.cache.restoreCache(paths, key, [config.restoreKey]);
         if (restoreKey) {
             const match = restoreKey === key;
             lib_core.info(`Restored from cache key "${restoreKey}" full match: ${match}.`);
@@ -88329,20 +88339,27 @@ async function run() {
                 // We restored the cache but it is not a full match.
                 config.saveState();
             }
-            setCacheHitOutput(match);
+            return match ? CacheHit.Full : CacheHit.Partial;
         }
         else {
             lib_core.info("No cache found.");
             config.saveState();
-            setCacheHitOutput(false);
+            return CacheHit.Miss;
         }
     }
     catch (e) {
-        setCacheHitOutput(false);
         reportError(e);
+        return CacheHit.Miss;
     }
 }
+var CacheHit;
+(function (CacheHit) {
+    CacheHit["Miss"] = "false";
+    CacheHit["Partial"] = "false";
+    CacheHit["Full"] = "true,";
+})(CacheHit || (CacheHit = {}));
 function setCacheHitOutput(cacheHit) {
+    lib_core.setOutput("partial-hit", (cacheHit === CacheHit.Partial).toString());
     lib_core.setOutput("cache-hit", cacheHit.toString());
 }
 run();

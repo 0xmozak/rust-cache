@@ -12,14 +12,18 @@ process.on("uncaughtException", (e) => {
 });
 
 async function run() {
+  setCacheHitOutput(await run_helper());
+}
+
+async function run_helper(): Promise<CacheHit> {
   const cacheProvider = getCacheProvider();
 
   if (!cacheProvider.cache.isFeatureAvailable()) {
-    setCacheHitOutput(false);
-    return;
+    return CacheHit.Miss;
   }
 
   try {
+    const fullMatch = core.getInput("require-full-match").toLowerCase() !== "true";
     var cacheOnFailure = core.getInput("cache-on-failure").toLowerCase();
     if (cacheOnFailure !== "true") {
       cacheOnFailure = "false";
@@ -36,7 +40,13 @@ async function run() {
     // Pass a copy of cachePaths to avoid mutating the original array as reported by:
     // https://github.com/actions/toolkit/pull/1378
     // TODO: remove this once the underlying bug is fixed.
-    const restoreKey = await cacheProvider.cache.restoreCache(config.cachePaths.slice(), key, [config.restoreKey]);
+    const paths = config.cachePaths.slice();
+
+    if (fullMatch && await cacheProvider.cache.restoreCache(paths, key, [config.restoreKey], {lookupOnly: true}) !== key) {
+      return CacheHit.Miss;
+    }
+
+    const restoreKey = await cacheProvider.cache.restoreCache(paths, key, [config.restoreKey]);
     if (restoreKey) {
       const match = restoreKey === key;
       core.info(`Restored from cache key "${restoreKey}" full match: ${match}.`);
@@ -52,21 +62,26 @@ async function run() {
         config.saveState();
       }
 
-      setCacheHitOutput(match);
+      return match ? CacheHit.Full : CacheHit.Partial;
     } else {
       core.info("No cache found.");
       config.saveState();
-
-      setCacheHitOutput(false);
+      return CacheHit.Miss
     }
   } catch (e) {
-    setCacheHitOutput(false);
-
     reportError(e);
+    return CacheHit.Miss
   }
 }
 
-function setCacheHitOutput(cacheHit: boolean): void {
+enum CacheHit {
+  Miss = "false",
+  Partial = "false",
+  Full = "true,"
+}
+
+function setCacheHitOutput(cacheHit: CacheHit): void {
+  core.setOutput("partial-hit", (cacheHit === CacheHit.Partial).toString());
   core.setOutput("cache-hit", cacheHit.toString());
 }
 
