@@ -88354,13 +88354,13 @@ async function run_helper() {
 }
 var CacheHit;
 (function (CacheHit) {
-    CacheHit["Miss"] = "false";
-    CacheHit["Partial"] = "false";
-    CacheHit["Full"] = "true";
+    CacheHit[CacheHit["Miss"] = 0] = "Miss";
+    CacheHit[CacheHit["Partial"] = 1] = "Partial";
+    CacheHit[CacheHit["Full"] = 2] = "Full";
 })(CacheHit || (CacheHit = {}));
 function setCacheHitOutput(cacheHit) {
     lib_core.setOutput("partial-hit", (cacheHit === CacheHit.Partial).toString());
-    lib_core.setOutput("cache-hit", cacheHit.toString());
+    lib_core.setOutput("cache-hit", (cacheHit === CacheHit.Full).toString());
 }
 run();
 

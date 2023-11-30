@@ -75,14 +75,14 @@ async function run_helper(): Promise<CacheHit> {
 }
 
 enum CacheHit {
-  Miss = "false",
-  Partial = "false",
-  Full = "true",
+  Miss,
+  Partial,
+  Full,
 }
 
 function setCacheHitOutput(cacheHit: CacheHit): void {
   core.setOutput("partial-hit", (cacheHit === CacheHit.Partial).toString());
-  core.setOutput("cache-hit", cacheHit.toString());
+  core.setOutput("cache-hit", (cacheHit === CacheHit.Full).toString());
 }
 
 run();
