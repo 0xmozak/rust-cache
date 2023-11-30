@@ -23,7 +23,7 @@ async function run_helper(): Promise<CacheHit> {
   }
 
   try {
-    const fullMatch = core.getInput("require-full-match").toLowerCase() !== "true";
+    const fullMatch = core.getInput("require-full-match").toLowerCase() === "true";
     var cacheOnFailure = core.getInput("cache-on-failure").toLowerCase();
     if (cacheOnFailure !== "true") {
       cacheOnFailure = "false";
