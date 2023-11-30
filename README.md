@@ -60,6 +60,12 @@ sensible defaults.
     # default: "false"
     cache-all-crates: ""
 
+    # Determines if an exact cache hit is required.
+    # If `true` and only partial cache-key match occurs, restore is skipped
+    # Useful when using multiple caches.
+    # default: "false"
+    require-full-match: ""
+
     # Determiners whether the cache should be saved.
     # If `false`, the cache is only restored.
     # Useful for jobs where the matrix is additive e.g. additional Cargo features,
@@ -70,7 +76,7 @@ sensible defaults.
     save-if: ${{ github.ref == 'refs/heads/master' }}
 
     # Specifies what to use as the backend providing cache
-    # Can be set to either "github" or "buildjet"
+    # Can be set to either "github", "buildjet", or "local"
     # default: "github"
     cache-provider: ""
 ```
@@ -82,6 +88,10 @@ Further examples are available in the [.github/workflows](./.github/workflows/) 
 **`cache-hit`**
 
 This is a boolean flag that will be set to `true` when there was an exact cache hit.
+
+**`partial-hit`**
+
+This is a boolean flag that will be set to `true` when there was an partial cache hit.
 
 ## Cache Effectiveness
 
