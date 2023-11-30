@@ -88305,7 +88305,7 @@ async function run_helper() {
         return CacheHit.Miss;
     }
     try {
-        const fullMatch = lib_core.getInput("require-full-match").toLowerCase() !== "true";
+        const fullMatch = lib_core.getInput("require-full-match").toLowerCase() === "true";
         var cacheOnFailure = lib_core.getInput("cache-on-failure").toLowerCase();
         if (cacheOnFailure !== "true") {
             cacheOnFailure = "false";
@@ -88356,7 +88356,7 @@ var CacheHit;
 (function (CacheHit) {
     CacheHit["Miss"] = "false";
     CacheHit["Partial"] = "false";
-    CacheHit["Full"] = "true,";
+    CacheHit["Full"] = "true";
 })(CacheHit || (CacheHit = {}));
 function setCacheHitOutput(cacheHit) {
     lib_core.setOutput("partial-hit", (cacheHit === CacheHit.Partial).toString());
