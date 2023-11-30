@@ -77,7 +77,7 @@ async function run_helper(): Promise<CacheHit> {
 enum CacheHit {
   Miss = "false",
   Partial = "false",
-  Full = "true,"
+  Full = "true",
 }
 
 function setCacheHitOutput(cacheHit: CacheHit): void {
