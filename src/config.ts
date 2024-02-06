@@ -122,14 +122,18 @@ export class CacheConfig {
     const workspaces: Array<Workspace> = [];
     const workspacesInput = core.getInput("workspaces") || ".";
     for (const workspace of workspacesInput.trim().split("\n")) {
-      let [root, target = "target"] = workspace.split("->").map((s) => s.trim());
+      let [root, target = "target"] = workspace
+        .split("->")
+        .map((s) => s.trim());
       root = path.resolve(root);
       target = path.join(root, target);
       workspaces.push(new Workspace(root, target));
     }
     self.workspaces = workspaces;
 
-    let keyFiles = await globFiles(".cargo/config.toml\nrust-toolchain\nrust-toolchain.toml");
+    let keyFiles = await globFiles(
+      ".cargo/config.toml\nrust-toolchain\nrust-toolchain.toml",
+    );
     const parsedKeyFiles = []; // keyFiles that are parsed, pre-processed and hashed
 
     hasher = crypto.createHash("sha1");
@@ -142,11 +146,15 @@ export class CacheConfig {
         )),
       );
 
-      const cargo_manifests = sort_and_uniq(await globFiles(`${root}/**/Cargo.toml`));
+      const cargo_manifests = sort_and_uniq(
+        await globFiles(`${root}/**/Cargo.toml`),
+      );
 
       for (const cargo_manifest of cargo_manifests) {
         try {
-          const content = await fs_promises.readFile(cargo_manifest, { encoding: "utf8" });
+          const content = await fs_promises.readFile(cargo_manifest, {
+            encoding: "utf8",
+          });
           // Use any since TomlPrimitive is not exposed
           const parsed = toml.parse(content) as { [key: string]: any };
 
@@ -183,36 +191,50 @@ export class CacheConfig {
           hasher.update(JSON.stringify(parsed));
 
           parsedKeyFiles.push(cargo_manifest);
-        } catch (e) { // Fallback to caching them as regular file
-          core.warning(`Error parsing Cargo.toml manifest, fallback to caching entire file: ${e}`);
+        } catch (e) {
+          // Fallback to caching them as regular file
+          core.warning(
+            `Error parsing Cargo.toml manifest, fallback to caching entire file: ${e}`,
+          );
           keyFiles.push(cargo_manifest);
         }
       }
 
-      const cargo_locks = sort_and_uniq(await globFiles(`${root}/**/Cargo.lock`));
+      const cargo_locks = sort_and_uniq(
+        await globFiles(`${root}/**/Cargo.lock`),
+      );
 
       for (const cargo_lock of cargo_locks) {
         try {
-          const content = await fs_promises.readFile(cargo_lock, { encoding: "utf8" });
+          const content = await fs_promises.readFile(cargo_lock, {
+            encoding: "utf8",
+          });
           const parsed = toml.parse(content);
 
           if (parsed.version !== 3 || !("package" in parsed)) {
             // Fallback to caching them as regular file since this action
             // can only handle Cargo.lock format version 3
-            core.warning('Unsupported Cargo.lock format, fallback to caching entire file');
+            core.warning(
+              "Unsupported Cargo.lock format, fallback to caching entire file",
+            );
             keyFiles.push(cargo_lock);
             continue;
           }
 
           // Package without `[[package]].source` and `[[package]].checksum`
           // are the one with `path = "..."` to crates within the workspace.
-          const packages = (parsed.package as any[]).filter((p: any) => "source" in p || "checksum" in p);
+          const packages = (parsed.package as any[]).filter(
+            (p: any) => "source" in p || "checksum" in p,
+          );
 
           hasher.update(JSON.stringify(packages));
 
           parsedKeyFiles.push(cargo_lock);
-        } catch (e) { // Fallback to caching them as regular file
-          core.warning(`Error parsing Cargo.lock manifest, fallback to caching entire file: ${e}`);
+        } catch (e) {
+          // Fallback to caching them as regular file
+          core.warning(
+            `Error parsing Cargo.lock manifest, fallback to caching entire file: ${e}`,
+          );
           keyFiles.push(cargo_lock);
         }
       }
@@ -266,7 +288,9 @@ export class CacheConfig {
 
     const self = new CacheConfig();
     Object.assign(self, JSON.parse(source));
-    self.workspaces = self.workspaces.map((w: any) => new Workspace(w.root, w.target));
+    self.workspaces = self.workspaces.map(
+      (w: any) => new Workspace(w.root, w.target),
+    );
 
     return self;
   }
@@ -339,7 +363,12 @@ interface RustVersion {
 }
 
 async function getRustVersion(): Promise<RustVersion> {
-  const stdout = await getCmdOutput("rustc", ["-vV"]);
+  const stdout = await getCmdOutput("nix", [
+    "develop",
+    "--command",
+    "rustc",
+    "-vV",
+  ]);
   let splits = stdout
     .split(/[\n\r]+/)
     .filter(Boolean)
