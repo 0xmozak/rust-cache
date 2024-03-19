@@ -87777,7 +87777,9 @@ class CacheConfig {
         const workspaces = [];
         const workspacesInput = core.getInput("workspaces") || ".";
         for (const workspace of workspacesInput.trim().split("\n")) {
-            let [root, target = "target"] = workspace.split("->").map((s) => s.trim());
+            let [root, target = "target"] = workspace
+                .split("->")
+                .map((s) => s.trim());
             root = external_path_default().resolve(root);
             target = external_path_default().join(root, target);
             workspaces.push(new Workspace(root, target));
@@ -87792,7 +87794,9 @@ class CacheConfig {
             const cargo_manifests = sort_and_uniq(await globFiles(`${root}/**/Cargo.toml`));
             for (const cargo_manifest of cargo_manifests) {
                 try {
-                    const content = await promises_default().readFile(cargo_manifest, { encoding: "utf8" });
+                    const content = await promises_default().readFile(cargo_manifest, {
+                        encoding: "utf8",
+                    });
                     // Use any since TomlPrimitive is not exposed
                     const parsed = parse(content);
                     if ("package" in parsed) {
@@ -87825,7 +87829,8 @@ class CacheConfig {
                     hasher.update(JSON.stringify(parsed));
                     parsedKeyFiles.push(cargo_manifest);
                 }
-                catch (e) { // Fallback to caching them as regular file
+                catch (e) {
+                    // Fallback to caching them as regular file
                     core.warning(`Error parsing Cargo.toml manifest, fallback to caching entire file: ${e}`);
                     keyFiles.push(cargo_manifest);
                 }
@@ -87833,12 +87838,14 @@ class CacheConfig {
             const cargo_locks = sort_and_uniq(await globFiles(`${root}/**/Cargo.lock`));
             for (const cargo_lock of cargo_locks) {
                 try {
-                    const content = await promises_default().readFile(cargo_lock, { encoding: "utf8" });
+                    const content = await promises_default().readFile(cargo_lock, {
+                        encoding: "utf8",
+                    });
                     const parsed = parse(content);
                     if (parsed.version !== 3 || !("package" in parsed)) {
                         // Fallback to caching them as regular file since this action
                         // can only handle Cargo.lock format version 3
-                        core.warning('Unsupported Cargo.lock format, fallback to caching entire file');
+                        core.warning("Unsupported Cargo.lock format, fallback to caching entire file");
                         keyFiles.push(cargo_lock);
                         continue;
                     }
@@ -87848,7 +87855,8 @@ class CacheConfig {
                     hasher.update(JSON.stringify(packages));
                     parsedKeyFiles.push(cargo_lock);
                 }
-                catch (e) { // Fallback to caching them as regular file
+                catch (e) {
+                    // Fallback to caching them as regular file
                     core.warning(`Error parsing Cargo.lock manifest, fallback to caching entire file: ${e}`);
                     keyFiles.push(cargo_lock);
                 }
@@ -87954,7 +87962,12 @@ function digest(hasher) {
     return hasher.digest("hex").substring(0, HASH_LENGTH);
 }
 async function getRustVersion() {
-    const stdout = await getCmdOutput("rustc", ["-vV"]);
+    const stdout = await getCmdOutput("nix", [
+        "develop",
+        "--command",
+        "rustc",
+        "-vV",
+    ]);
     let splits = stdout
         .split(/[\n\r]+/)
         .filter(Boolean)
